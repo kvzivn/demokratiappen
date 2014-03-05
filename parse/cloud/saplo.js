@@ -7,13 +7,12 @@ var saploKeys = require('cloud/saplo_parameters').saploKeys; // relative to root
 function extractTags(request, response){
   var requestJSON = JSON.parse(request.body);
 
-  // console.log("ERMAN:::REQUEST" + JSON.stringify(request));
-
   var textToBeParsed = requestJSON.text;
   var textUrl = requestJSON.url;
   var textHeadline = requestJSON.title;
   // var textDate = requestJSON.date;
   var urlExists = false;
+  var url; // The Url object in Parse database
 
   if (!textToBeParsed) {
     response.error("Missing required field: text");
@@ -103,17 +102,17 @@ function extractTags(request, response){
 
     tagRequest.params.text_id = textId;
 
-    if (!urlExists) {
-      addUrl(textUrl, textId, textToBeParsed, textHeadline);
-    }
-    
-    Parse.Cloud.httpRequest( 
-    {
+    // This is where we collect our parse tags. The indices matches the
+    // items in the saploTags.tags array
+    var resultTags = [];
+    var relevanceTags = [];
+   
+    Parse.Cloud.httpRequest({
       url: saploUrlWithToken,
       method: 'POST',
       headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      body: JSON.stringify(tagRequest),
-      success: function(httpResponse) {
+      body: JSON.stringify(tagRequest)
+    }).then(function (httpResponse) {
         if (httpResponse.status != 200) {
           console.log("tagRequest: saplo returned status: " + httpResponse.status);
           response.error("tagRequest REST request failed");
@@ -135,14 +134,11 @@ function extractTags(request, response){
           tagNames = tagNames.concat(saploTags.tags[i].tag);
         }
 
-        // This is where we collect our parse tags. The indices matches the
-        // items in the saploTags.tags array
-        var resultTags = [];
-
         var Tag = Parse.Object.extend("Tag");
         var query = new Parse.Query("Tag");
         query.containedIn("name", tagNames);
-        query.find().then(function (parseTags) {
+        return query.find();
+    }).then(function (parseTags) {
           // Check if we have found any new tags that don't have a post in
           // the parse database.
           var newTagPromises = [];
@@ -172,34 +168,49 @@ function extractTags(request, response){
 
           // Return promise that is triggered when all tags have been saved.
           return Parse.Promise.when(newTagPromises);
-        }).then(function () {
+    }).then(function () {
           // Associate relevance with the tags (now we have id on all our
           // objects).
           // Note resultTags and saploTags match so same index can be used in
           // both arrays.
-          var relevanceTags = [];
-          for (var i = 0; i < resultTags.length; i++) {
+         var relevance = [];
+         for (var i = 0; i < resultTags.length; i++) {
             relevanceTag = {
               id: resultTags[i].id,
               name: resultTags[i].get("name"),
               relevance: saploTags.tags[i].relevance
             };
             relevanceTags[relevanceTags.length] = relevanceTag;
+            relevance[relevance.length] = saploTags.tags[i].relevance;
           }
  
-          // TODO: Save the tags on the Url object
+          // Save the tags on the Url object
+          var promise;
+          if (!urlExists) {
+            var Url = Parse.Object.extend("Url");
+            var url = new Url();
 
-          // Return the result tag objects to the requester
-          response.success(relevanceTags);
-        }, function (error) {
-          response.error("Finding demokratiappen tags failed");
-        });
-      },
-      error: function(httpResponse){
-        console.error('SaploUrlWithToken request failed with response code ' + httpResponse.status);
-        response.error("Retrieving tags failed.");
-      }
-    });          
+            url.set("url", textUrl);
+            url.set("textId", textId);
+            url.set("text", textToBeParsed);
+            url.set("headline", textHeadline);
+            url.set("tags", resultTags);
+            url.set("relevance", relevance);
+
+            promise = url.save();
+          }
+          else {
+            // Create a promise that immedideately succeeds, just to ensure the
+            // code flow works as above.
+            promise = new Parse.Promise.as();
+          }
+          return promise;
+    }).then(function () {
+      // Return the result tag objects to the requester
+      response.success(relevanceTags);
+    }, function (error) {
+      response.error("Finding demokratiappen tags failed");
+    });
   } // textIdSuccess
 
   // We have access to Saplo, try to find the text in our database
@@ -288,17 +299,5 @@ function extractTags(request, response){
     }
   });  // Main request
 } // extractTags
-
-function addUrl(textUrl, textId, textToBeParsed, textHeadline){
-  var Url = Parse.Object.extend("Url");
-  var url = new Url();
-
-  url.set("url", textUrl);
-  url.set("textId", textId);
-  url.set("text", textToBeParsed);
-  url.set("headline", textHeadline);
-
-  url.save();
-} // addUrl
 
 exports.extractTags = extractTags;
